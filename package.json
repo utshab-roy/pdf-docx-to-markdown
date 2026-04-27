@@ -1,0 +1,118 @@
+{
+  "name": "pdf-docx-to-markdown",
+  "displayName": "pdf docx to markdown",
+  "description": "Convert PDF and DOCX files to clean Markdown — free, local, no account needed.",
+  "version": "0.1.0",
+  "publisher": "utshab-roy",
+  "icon": "icon.png",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Formatters",
+    "Other"
+  ],
+  "keywords": [
+    "pdf",
+    "docx",
+    "word",
+    "markdown",
+    "converter"
+  ],
+  "main": "./dist/extension.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/utshab-roy/pdf-docx-to-markdown"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "mdConverter.convertFile",
+        "title": "Convert to Markdown",
+        "category": "pdf docx to markdown"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "mdConverter.convertFile",
+          "when": "resourceExtname == .pdf || resourceExtname == .docx || resourceExtname == .doc",
+          "group": "7_modification@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "pdf docx to markdown",
+      "properties": {
+        "mdConverter.autoPreview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open Markdown preview after conversion."
+        },
+        "mdConverter.outputFolder": {
+          "type": "string",
+          "enum": [
+            "same",
+            "custom",
+            "workspace"
+          ],
+          "enumDescriptions": [
+            "Save in the same folder as the source file",
+            "Save in a custom path (set mdConverter.customOutputPath)",
+            "Save in the workspace root folder"
+          ],
+          "default": "same",
+          "description": "Where to save converted Markdown files."
+        },
+        "mdConverter.customOutputPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to save files when outputFolder is set to 'custom'."
+        },
+        "mdConverter.conflictBehavior": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "overwrite",
+            "rename"
+          ],
+          "enumDescriptions": [
+            "Ask what to do when the output file already exists",
+            "Always overwrite existing files",
+            "Always rename the new file (e.g. report_1.md)"
+          ],
+          "default": "ask",
+          "description": "What to do if the output .md file already exists."
+        },
+        "mdConverter.showLogs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically show the Output panel during conversion."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "node esbuild.js --production",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/turndown": "^5.0.4",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "esbuild": "^0.20.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "mammoth": "^1.8.0",
+    "pdfjs-dist": "^4.4.168",
+    "turndown": "^7.1.2"
+  }
+}

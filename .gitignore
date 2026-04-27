@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+*.vsix
+.vscode-test/
+*.log
+.DS_Store
+.claude/
+example.pdf
+example.md
