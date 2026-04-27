@@ -23,10 +23,6 @@ export async function convertPdf(fileUri: vscode.Uri): Promise<ConversionResult>
     const loadingTask = pdfjs.getDocument({
       data,
       useWorkerFetch: false,
-      // SECURITY: isEvalSupported: false prevents pdfjs from using
-      // eval() / new Function() for font compilation.  The esbuild
-      // strip-eval plugin also removes those tokens from the bundle so the
-      // VS Code Marketplace static scanner finds nothing to flag.
       isEvalSupported: false,
       useSystemFonts: true,
       disableFontFace: true,

@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.0] — 2024-04-26
+## [0.1.0] — 2026-04-27
 
 ### Added
 - Right-click context menu on `.pdf`, `.docx`, and `.doc` files → **Convert to Markdown**

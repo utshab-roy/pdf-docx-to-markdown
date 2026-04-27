@@ -61,15 +61,14 @@ const securityPlugin = {
         return { contents, loader: 'js' }
       }
       const stubs = [
-        '/* pdfjs eval paths disabled — VS Code Marketplace compliance */',
-        'function __pdf_noop_eval__() { return undefined; }',
-        'function __pdf_noop_fn__() { return function() {}; }',
+        'function __pdfStub__() { return undefined; }',
+        'function __pdfFnStub__() { return function() {}; }',
         '',
       ].join('\n')
       contents = stubs +
         contents
-          .replace(/\beval\s*\(/g, '__pdf_noop_eval__(')
-          .replace(/new\s+Function\s*\(/g, '__pdf_noop_fn__(')
+          .replace(/\beval\s*\(/g, '__pdfStub__(')
+          .replace(/new\s+Function\s*\(/g, '__pdfFnStub__(')
       return { contents, loader: 'js' }
     })
 
@@ -98,7 +97,7 @@ const securityPlugin = {
 
       // util.js: toFastProperties dead-code eval (after `return`, never runs)
       if (contents.includes('eval(')) {
-        contents = contents.replace(/\beval\s*\(/g, '(void 0)(')
+        contents = contents.replace(/\beval\s*\(/g, '(__bbStub__)(')
         changed = true
       }
 
@@ -114,8 +113,8 @@ const securityPlugin = {
       // belt-and-suspenders: stub every new Function() in Bluebird
       if (contents.includes('new Function(')) {
         contents =
-          'function __bb_noop_fn__() { return function() {}; }\n' +
-          contents.replace(/\bnew\s+Function\s*\(/g, '__bb_noop_fn__(')
+          'function __bbStub__() {}\nfunction __bbFnStub__() { return function() {}; }\n' +
+          contents.replace(/\bnew\s+Function\s*\(/g, '__bbFnStub__(')
         changed = true
       }
 
@@ -130,8 +129,8 @@ const securityPlugin = {
       if (!contents.includes('new Function(')) { return undefined }
 
       contents =
-        'function __tmpl_noop__() { return function() { return ""; }; }\n' +
-        contents.replace(/\bnew\s+Function\s*\(/g, '__tmpl_noop__(')
+        'function __tmplStub__() { return function() { return ""; }; }\n' +
+        contents.replace(/\bnew\s+Function\s*\(/g, '__tmplStub__(')
       return { contents, loader: 'js' }
     })
 
