@@ -161,7 +161,7 @@ const buildOptions = {
   format: 'cjs',
   platform: 'node',
   target: 'node20',
-  sourcemap: true,
+  sourcemap: !production,
   // minifySyntax folds constant expressions and eliminates if(false){} blocks
   // without renaming identifiers or stripping whitespace — the bundle stays
   // readable for Marketplace reviewers and source-maps remain accurate.

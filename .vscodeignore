@@ -13,7 +13,7 @@ package-lock.json
 *.ts
 example.pdf
 example.md
+dist/extension.js.map
 !dist/extension.js
-!dist/extension.js.map
 !dist/pdf.worker.mjs
 node_modules/
