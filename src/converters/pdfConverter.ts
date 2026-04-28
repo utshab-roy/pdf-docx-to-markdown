@@ -9,12 +9,13 @@ interface RawItem {
   x: number
   y: number
   hasEOL: boolean
+  isBold: boolean
 }
 
 // Type guard — also validates the transform matrix we depend on for coordinates.
 function isTextItem(
   item: unknown,
-): item is { str: string; transform: number[]; hasEOL: boolean } {
+): item is { str: string; transform: number[]; hasEOL: boolean; fontName?: string } {
   if (typeof item !== 'object' || item === null) return false
   const obj = item as Record<string, unknown>
   return (
@@ -57,6 +58,7 @@ export async function convertPdf(fileUri: vscode.Uri): Promise<ConversionResult>
             x: item.transform[4],
             y: item.transform[5],
             hasEOL: !!item.hasEOL,
+            isBold: /bold/i.test(item.fontName ?? ''),
           })
         }
       }
@@ -154,11 +156,32 @@ function rowAlignsToColumns(row: RawItem[], colXs: number[]): boolean {
   )
 }
 
+// Join a list of items into a string, wrapping consecutive bold runs with **…**.
+// Only wraps if the bold run contains non-whitespace so we never emit `**  **`.
+function itemsToString(items: RawItem[]): string {
+  let result = ''
+  let boldRun = ''
+
+  for (const item of items) {
+    if (item.isBold) {
+      boldRun += item.str
+    } else {
+      if (boldRun) {
+        result += boldRun.trim() ? `**${boldRun}**` : boldRun
+        boldRun = ''
+      }
+      result += item.str
+    }
+  }
+  if (boldRun) result += boldRun.trim() ? `**${boldRun}**` : boldRun
+  return result
+}
+
 // Bucket each non-whitespace item into the nearest column slot.
-// Multiple items that land in the same slot are concatenated (handles bold/
-// italic runs and other font changes within a single cell).
+// Multiple items that land in the same slot are collected then joined via
+// itemsToString so that bold runs within a cell are preserved.
 function assignToCols(row: RawItem[], colXs: number[]): string[] {
-  const slots = colXs.map(() => '')
+  const slotItems: RawItem[][] = colXs.map(() => [])
   for (const item of contentItems(row)) {
     let best = 0
     let bestDist = Infinity
@@ -166,9 +189,28 @@ function assignToCols(row: RawItem[], colXs: number[]): string[] {
       const d = Math.abs(item.x - colXs[c])
       if (d < bestDist) { bestDist = d; best = c }
     }
-    slots[best] += item.str
+    slotItems[best].push(item)
   }
-  return slots.map(s => s.trim())
+  return slotItems.map(items => itemsToString(items).trim())
+}
+
+// Minimum gap (pt) between adjacent column X positions for the row to be
+// treated as a table header.  Body-text word spacing is 15–40 pt; real table
+// columns are typically 50 pt+ apart.  Items closer than this are merged into
+// a single column, collapsing flowing prose into one column and rejecting it.
+const MIN_COL_GAP = 50
+
+// Derive distinct column X positions from a header row by merging items that
+// are closer than MIN_COL_GAP to each other.
+function detectColXs(content: RawItem[]): number[] {
+  const xs = content.map(it => it.x).sort((a, b) => a - b)
+  const cols: number[] = [xs[0]]
+  for (let k = 1; k < xs.length; k++) {
+    if (xs[k] - cols[cols.length - 1] >= MIN_COL_GAP) {
+      cols.push(xs[k])
+    }
+  }
+  return cols
 }
 
 // Convert one page's rows into Markdown, detecting tables via X alignment.
@@ -180,36 +222,52 @@ function buildPageMarkdown(rows: RawItem[][]): string {
     const row = rows[i]
     const content = contentItems(row)
 
-    // A table header must have ≥2 distinct content items (columns).
+    // Derive distinct, well-separated column positions.  Two or more are
+    // required — a single merged column means it is flowing prose, not a table.
     if (content.length >= 2) {
-      const colXs = content.map(item => item.x)
-      let j = i + 1
+      const colXs = detectColXs(content)
 
-      // Extend the table while every subsequent row aligns to those columns.
-      while (j < rows.length && rowAlignsToColumns(rows[j], colXs)) {
-        j++
-      }
+      if (colXs.length >= 2) {
+        let j = i + 1
 
-      // Need at least one data row beneath the header to form a real table.
-      if (j - i >= 2) {
-        const logicalRows = groupVisualRowsIntoLogical(rows.slice(i, j), colXs)
+        // Extend the table while every subsequent row aligns to those columns.
+        while (j < rows.length && rowAlignsToColumns(rows[j], colXs)) {
+          j++
+        }
 
-        if (logicalRows.length >= 2) {
-          const header = logicalRows[0]
-          lines.push('| ' + header.join(' | ') + ' |')
-          lines.push('| ' + header.map(() => '---').join(' | ') + ' |')
-          for (const dataRow of logicalRows.slice(1)) {
-            lines.push('| ' + dataRow.join(' | ') + ' |')
+        // Need at least one data row beneath the header to form a real table.
+        if (j - i >= 2) {
+          // Reject label:value layouts where every filled first-column item ends
+          // with ':' — e.g. "Name:", "Date of Birth:", "Address:".  Those are
+          // field labels, not table column headers.
+          const col0Values = rows
+            .slice(i, j)
+            .map(r => assignToCols(r, colXs)[0].trim())
+            .filter(v => v !== '')
+          const isLabelValue =
+            col0Values.length > 0 && col0Values.every(v => v.endsWith(':'))
+
+          if (!isLabelValue) {
+            const logicalRows = groupVisualRowsIntoLogical(rows.slice(i, j), colXs)
+
+            if (logicalRows.length >= 2) {
+              const header = logicalRows[0]
+              lines.push('| ' + header.join(' | ') + ' |')
+              lines.push('| ' + header.map(() => '---').join(' | ') + ' |')
+              for (const dataRow of logicalRows.slice(1)) {
+                lines.push('| ' + dataRow.join(' | ') + ' |')
+              }
+              lines.push('')
+              i = j
+              continue
+            }
           }
-          lines.push('')
-          i = j
-          continue
         }
       }
     }
 
     // Regular text row — join all items in left-to-right reading order.
-    const text = row.map(r => r.str).join('').trimEnd()
+    const text = itemsToString(row).trimEnd()
     if (text) lines.push(text)
     i++
   }

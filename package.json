@@ -2,7 +2,7 @@
   "name": "pdf-docx-to-markdown",
   "displayName": "PDF & DOCX to Markdown",
   "description": "Convert PDF and Word documents (.docx, .doc) to Markdown directly in VS Code. Works locally and offline.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "utshab-roy",
   "icon": "icon.png",
   "license": "MIT",

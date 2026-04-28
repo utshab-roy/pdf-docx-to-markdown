@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.4] — 2026-04-28
+
+### Fixed
+- Regular paragraph text no longer rendered as tables — column detection now requires at least 50pt gap between columns (body text word spacing is 15–40pt, real table columns are 50pt+)
+- Label-value layouts (e.g. "Name: Utshab Roy", "Address: …") no longer converted to tables — blocks where every first-column item ends with ':' are treated as plain text
+
 ## [0.1.3] — 2026-04-27
 
 ### Fixed
