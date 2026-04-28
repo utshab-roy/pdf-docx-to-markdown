@@ -2,13 +2,25 @@ import * as vscode from 'vscode'
 import { log, logError } from '../utils/logger'
 import type { ConversionResult } from '../types'
 
-// Type-only guard — avoids importing pdfjs types that may shift between versions
-function isTextItem(item: unknown): item is { str: string; hasEOL: boolean } {
+// A single text item extracted from pdfjs, enriched with page coordinates.
+// transform[4] = x (horizontal position), transform[5] = y (vertical position).
+interface RawItem {
+  str: string
+  x: number
+  y: number
+  hasEOL: boolean
+}
+
+// Type guard — also validates the transform matrix we depend on for coordinates.
+function isTextItem(
+  item: unknown,
+): item is { str: string; transform: number[]; hasEOL: boolean } {
+  if (typeof item !== 'object' || item === null) return false
+  const obj = item as Record<string, unknown>
   return (
-    typeof item === 'object' &&
-    item !== null &&
-    'str' in item &&
-    typeof (item as Record<string, unknown>).str === 'string'
+    typeof obj.str === 'string' &&
+    Array.isArray(obj.transform) &&
+    (obj.transform as number[]).length >= 6
   )
 }
 
@@ -36,22 +48,26 @@ export async function convertPdf(fileUri: vscode.Uri): Promise<ConversionResult>
       const page = await pdf.getPage(pageNum)
       const textContent = await page.getTextContent()
 
-      let pageText = ''
+      // Collect every text item with its real page coordinates.
+      const rawItems: RawItem[] = []
       for (const item of textContent.items) {
-        if (isTextItem(item)) {
-          pageText += item.str
-          if (item.hasEOL) {
-            pageText += '\n'
-          }
+        if (isTextItem(item) && item.str !== '') {
+          rawItems.push({
+            str: item.str,
+            x: item.transform[4],
+            y: item.transform[5],
+            hasEOL: !!item.hasEOL,
+          })
         }
       }
-      fullText += pageText + '\n\n'
+
+      const rows = groupIntoRows(rawItems)
+      fullText += buildPageMarkdown(rows) + '\n\n'
       page.cleanup()
     }
 
     const trimmed = fullText.trim()
 
-    // Heuristic: text-based PDFs always yield more than a handful of chars
     if (trimmed.length < 20) {
       return {
         success: false,
@@ -85,7 +101,222 @@ export async function convertPdf(fileUri: vscode.Uri): Promise<ConversionResult>
 }
 
 // ---------------------------------------------------------------------------
-// Post-processing: convert flat PDF text into structured Markdown
+// Coordinate-based layout analysis
+// ---------------------------------------------------------------------------
+
+// Items within Y_TOL points vertically are considered on the same row.
+// 4pt covers sub/superscript variation and slight baseline shifts within a line
+// without accidentally merging items from adjacent lines (typical line gap ≥12pt).
+const Y_TOL = 4
+
+// An item's X position must be within X_TOL points of a column boundary to be
+// assigned to that column.  20pt ≈ 7mm — generous enough for bold/italic shifts
+// while staying well below the minimum useful column width.
+const X_TOL = 20
+
+// Group flat item list into rows sorted top-to-bottom, left-to-right.
+// PDF Y-axis points upward, so larger Y = higher on the page.
+function groupIntoRows(items: RawItem[]): RawItem[][] {
+  if (items.length === 0) return []
+
+  const sorted = [...items].sort((a, b) => b.y - a.y || a.x - b.x)
+  const rows: RawItem[][] = []
+  let current: RawItem[] = [sorted[0]]
+  let rowY = sorted[0].y
+
+  for (let i = 1; i < sorted.length; i++) {
+    const item = sorted[i]
+    if (Math.abs(item.y - rowY) <= Y_TOL) {
+      current.push(item)
+    } else {
+      rows.push([...current].sort((a, b) => a.x - b.x))
+      current = [item]
+      rowY = item.y
+    }
+  }
+  rows.push([...current].sort((a, b) => a.x - b.x))
+
+  return rows
+}
+
+// Only the non-whitespace items in a row carry meaningful column positions.
+function contentItems(row: RawItem[]): RawItem[] {
+  return row.filter(r => r.str.trim() !== '')
+}
+
+// Returns true if every non-whitespace item in `row` aligns (within X_TOL)
+// to at least one of the column X-positions established by the header row.
+function rowAlignsToColumns(row: RawItem[], colXs: number[]): boolean {
+  const content = contentItems(row)
+  if (content.length === 0) return false
+  return content.every(item =>
+    colXs.some(cx => Math.abs(item.x - cx) <= X_TOL),
+  )
+}
+
+// Bucket each non-whitespace item into the nearest column slot.
+// Multiple items that land in the same slot are concatenated (handles bold/
+// italic runs and other font changes within a single cell).
+function assignToCols(row: RawItem[], colXs: number[]): string[] {
+  const slots = colXs.map(() => '')
+  for (const item of contentItems(row)) {
+    let best = 0
+    let bestDist = Infinity
+    for (let c = 0; c < colXs.length; c++) {
+      const d = Math.abs(item.x - colXs[c])
+      if (d < bestDist) { bestDist = d; best = c }
+    }
+    slots[best] += item.str
+  }
+  return slots.map(s => s.trim())
+}
+
+// Convert one page's rows into Markdown, detecting tables via X alignment.
+function buildPageMarkdown(rows: RawItem[][]): string {
+  const lines: string[] = []
+  let i = 0
+
+  while (i < rows.length) {
+    const row = rows[i]
+    const content = contentItems(row)
+
+    // A table header must have ≥2 distinct content items (columns).
+    if (content.length >= 2) {
+      const colXs = content.map(item => item.x)
+      let j = i + 1
+
+      // Extend the table while every subsequent row aligns to those columns.
+      while (j < rows.length && rowAlignsToColumns(rows[j], colXs)) {
+        j++
+      }
+
+      // Need at least one data row beneath the header to form a real table.
+      if (j - i >= 2) {
+        const logicalRows = groupVisualRowsIntoLogical(rows.slice(i, j), colXs)
+
+        if (logicalRows.length >= 2) {
+          const header = logicalRows[0]
+          lines.push('| ' + header.join(' | ') + ' |')
+          lines.push('| ' + header.map(() => '---').join(' | ') + ' |')
+          for (const dataRow of logicalRows.slice(1)) {
+            lines.push('| ' + dataRow.join(' | ') + ' |')
+          }
+          lines.push('')
+          i = j
+          continue
+        }
+      }
+    }
+
+    // Regular text row — join all items in left-to-right reading order.
+    const text = row.map(r => r.str).join('').trimEnd()
+    if (text) lines.push(text)
+    i++
+  }
+
+  return lines.join('\n')
+}
+
+// Group visual rows (one per PDF text line) into logical table rows.
+//
+// Three-case decision per visual row, backed by a calibrated Y-gap reference:
+//
+//   col[0] empty              → continuation (certain — other columns are wrapping)
+//   col[0] only, others empty → col[0] itself is wrapping; treat as continuation
+//                               unless the Y gap is distinctly larger than the
+//                               known within-cell line spacing
+//   col[0] + other cols       → new logical row, unless the Y gap is within the
+//                               within-cell range (all columns wrapping together)
+//
+// The within-cell line spacing is calibrated from rows where col[0] is empty —
+// those are unambiguously continuations, so their gap is a confirmed line gap.
+//
+//   Visual rows:                    Logical row output:
+//   | Long Title L1 | Desc | ... |  | Long Title L1<br>Long Title L2 | Desc | ...
+//   | Long Title L2 |      |     |
+//
+function groupVisualRowsIntoLogical(
+  visualRows: RawItem[][],
+  colXs: number[],
+): string[][] {
+  if (visualRows.length === 0) return []
+
+  // Average Y of a visual row (accounts for minor baseline variations)
+  const avgY = (row: RawItem[]) =>
+    row.length === 0 ? 0 : row.reduce((s, r) => s + r.y, 0) / row.length
+
+  // Pre-compute Y gap before each visual row (index 0 is unused / 0)
+  const yGaps: number[] = [0]
+  for (let vi = 1; vi < visualRows.length; vi++) {
+    yGaps.push(Math.abs(avgY(visualRows[vi - 1]) - avgY(visualRows[vi])))
+  }
+
+  // Calibrate the within-cell line gap from rows where col[0] is definitely
+  // empty — those are unambiguous continuations of another column's text.
+  const confirmedGaps: number[] = []
+  for (let vi = 1; vi < visualRows.length; vi++) {
+    const slots = assignToCols(visualRows[vi], colXs)
+    if (slots[0] === '' && slots.some(s => s !== '')) {
+      confirmedGaps.push(yGaps[vi])
+    }
+  }
+  confirmedGaps.sort((a, b) => a - b)
+  const medianWithin =
+    confirmedGaps.length > 0
+      ? confirmedGaps[Math.floor(confirmedGaps.length / 2)]
+      : null
+
+  const logical: string[][] = []
+
+  for (let vi = 0; vi < visualRows.length; vi++) {
+    const slots = assignToCols(visualRows[vi], colXs)
+    if (slots.every(s => s === '')) continue  // skip blank/separator lines
+
+    if (logical.length === 0) {
+      logical.push([...slots])
+      continue
+    }
+
+    const gap    = yGaps[vi]
+    const col0   = slots[0] !== ''
+    const others = slots.slice(1).some(s => s !== '')
+
+    let isNewRow: boolean
+
+    if (!col0) {
+      // col[0] empty → definitely a continuation of another column's text
+      isNewRow = false
+    } else if (!others) {
+      // col[0] content only, all other slots empty → col[0] itself is wrapping.
+      // Treat as a new row only when the gap is clearly larger than within-cell
+      // spacing (meaning there really is a row boundary here).
+      isNewRow = medianWithin !== null && gap > medianWithin * 1.5
+    } else {
+      // col[0] + other columns have content → most likely a new logical row.
+      // Treat as a continuation only when the gap is tightly within the
+      // within-cell range (all columns happening to wrap on the same line).
+      isNewRow = medianWithin === null || gap > medianWithin * 1.3
+    }
+
+    if (isNewRow) {
+      logical.push([...slots])
+    } else {
+      const current = logical[logical.length - 1]
+      for (let c = 0; c < slots.length; c++) {
+        if (slots[c]) {
+          current[c] = current[c] ? current[c] + '<br>' + slots[c] : slots[c]
+        }
+      }
+    }
+  }
+
+  return logical
+}
+
+// ---------------------------------------------------------------------------
+// Post-processing: headings, bullets, spacing, line breaks
+// Table detection is now handled upstream by buildPageMarkdown using real
+// coordinates, so detectTables is no longer needed here.
 // ---------------------------------------------------------------------------
 
 function postProcess(text: string): string {
@@ -96,10 +327,8 @@ function postProcess(text: string): string {
     .split('\n')
     .map(l => l.trimEnd())
 
-  // Order matters: bullets first (so converted lines are excluded from tables)
   const withBullets  = detectBullets(lines)
-  const withTables   = detectTables(withBullets)
-  const withHeadings = detectHeadings(withTables)
+  const withHeadings = detectHeadings(withBullets)
   const spaced       = ensureSpacing(withHeadings)
   const withBreaks   = addLineBreaks(spaced)
 
@@ -107,7 +336,6 @@ function postProcess(text: string): string {
 }
 
 // ── Bullet detection ─────────────────────────────────────────────────────────
-// Convert PDF bullet symbols to Markdown `- ` and normalise `1)` → `1.`
 
 const PDF_BULLET_RE = /^[●•◦▪▸▷►◆◇○▶✓✔✗✘→‣⁃–—]\s*/
 
@@ -130,76 +358,6 @@ function detectBullets(lines: string[]): string[] {
 
     return line
   })
-}
-
-// ── Table detection ──────────────────────────────────────────────────────────
-// Consecutive lines with ≥2 tab- or multi-space-separated columns → table.
-// Requires ≥2 rows and identical column counts to reduce false positives.
-
-function splitCols(line: string): string[] {
-  const trimmed = line.trim()
-  // Tab-separated (explicit table export from some tools)
-  if (trimmed.includes('\t')) {
-    return trimmed.split('\t').map(s => s.trim()).filter(Boolean)
-  }
-  // Multiple spaces (≥2) as column separator
-  return trimmed.split(/\s{2,}/).map(s => s.trim()).filter(Boolean)
-}
-
-function isTableCandidate(line: string): boolean {
-  const t = line.trim()
-  // Skip empty lines, headings, existing table rows, list items, numbered items
-  if (!t) return false
-  if (t.startsWith('#') || t.startsWith('|')) return false
-  if (t.startsWith('- ') || t.startsWith('* ')) return false
-  if (/^\d+[.)]\s/.test(t)) return false
-  return splitCols(line).length >= 2
-}
-
-function detectTables(lines: string[]): string[] {
-  const out: string[] = []
-  let i = 0
-
-  while (i < lines.length) {
-    if (!isTableCandidate(lines[i])) {
-      out.push(lines[i])
-      i++
-      continue
-    }
-
-    // Collect a run of consecutive, non-blank table-candidate rows
-    let j = i
-    while (j < lines.length && lines[j].trim() !== '' && isTableCandidate(lines[j])) {
-      j++
-    }
-
-    const block = lines.slice(i, j)
-
-    if (block.length >= 2) {
-      const colCounts = block.map(l => splitCols(l).length)
-      const maxCols   = Math.max(...colCounts)
-      const minCols   = Math.min(...colCounts)
-
-      // Accept only when every row has the same number of columns
-      if (maxCols >= 2 && maxCols === minCols) {
-        const rows = block.map(l => splitCols(l))
-        out.push('| ' + rows[0].join(' | ') + ' |')
-        out.push('| ' + rows[0].map(() => '---').join(' | ') + ' |')
-        for (const row of rows.slice(1)) {
-          out.push('| ' + row.join(' | ') + ' |')
-        }
-        out.push('')
-        i = j
-        continue
-      }
-    }
-
-    // Not a valid table — emit only the first line and retry from the next
-    out.push(lines[i])
-    i++
-  }
-
-  return out
 }
 
 // ── Heading detection ────────────────────────────────────────────────────────
@@ -267,9 +425,8 @@ function ensureSpacing(lines: string[]): string[] {
 }
 
 // ── Hard line breaks ─────────────────────────────────────────────────────────
-// Markdown collapses a single newline into a space.  Appending two spaces
-// before each newline forces a visible line break in the rendered preview.
-// Block-level elements (headings, table rows, list items) are excluded.
+// Markdown collapses a single newline into a space.  Two trailing spaces force
+// a visible line break in the rendered preview without creating a new paragraph.
 
 function addLineBreaks(lines: string[]): string[] {
   return lines.map(line => {

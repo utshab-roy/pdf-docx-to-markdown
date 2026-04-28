@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.3] — 2026-04-27
+
+### Fixed
+- Table multi-line cell detection now handles the case where the first column itself wraps across multiple visual lines (Y-gap calibration from confirmed continuation rows)
+
+## [0.1.2] — 2026-04-27
+
+### Fixed
+- DOCX conversion no longer shows a warning popup for unsupported styles or embedded objects — mammoth messages are still logged to the Output channel but do not interrupt the user
+
 ## [0.1.1] — 2026-04-27
 
 ### Fixed

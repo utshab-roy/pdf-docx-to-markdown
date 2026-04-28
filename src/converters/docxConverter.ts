@@ -20,6 +20,10 @@ export async function convertDocx(fileUri: vscode.Uri): Promise<ConversionResult
 
     const htmlResult = await mammoth.convertToHtml({ buffer })
 
+    // Log mammoth messages to the Output channel for debugging, but do not
+    // surface them as user-facing warnings — they reflect unsupported DOCX
+    // features (embedded objects, custom styles, etc.) that don't affect the
+    // quality of the Markdown output.
     for (const msg of htmlResult.messages) {
       log(`mammoth [${msg.type}]: ${msg.message}`)
     }
@@ -29,9 +33,6 @@ export async function convertDocx(fileUri: vscode.Uri): Promise<ConversionResult
     return {
       success: true,
       content: markdown,
-      warnings: htmlResult.messages
-        .filter((m) => m.type === 'warning')
-        .map((m) => m.message),
     }
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error))
